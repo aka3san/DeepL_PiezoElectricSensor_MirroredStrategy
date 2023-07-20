@@ -1,0 +1,12 @@
+SampleProgram/
+BPDatas_error/
+References/
+BlueToothSample/
+TrainingData/
+figures/
+*.sh
+*.stats
+*.csv
+*.out
+.vscode/
+report.log
