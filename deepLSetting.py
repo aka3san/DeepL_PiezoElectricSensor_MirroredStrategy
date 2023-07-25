@@ -4,15 +4,11 @@
 # In[30]:
 import tensorflow as tf 
 import numpy as np
-from keras.models import Sequential
-from keras.layers import Dense, Dropout, Activation
-import keras.optimizers as opt
 from bayes_opt import BayesianOptimization
 from sklearn.model_selection import KFold
 from sklearn.model_selection import train_test_split
 import pyswarms as ps
 from pyswarms.utils.search import GridSearch
-import horovod.keras as hvd
 #機械学習のハイパーパラメータ、学習方法などをまとめたクラス。
 class DeepLSetting:
     
@@ -20,9 +16,10 @@ class DeepLSetting:
         self.num_featureValue = None #特徴量の数
         self.num_output = None #目的変数の数
         self.trainRow = None #学習データの割合
-        self.model = Sequential()#学習モデル。
+        self.strategy = tf.distribute.MirroredStrategy() #分散ストラテジーの作成
+        with self.strategy.scope():
+            self.model = tf.keras.Sequential()#学習モデル。
         self.num_nodeList = None #レイヤーの配列。
-        #self.strategy = tf.distribute.MirroredStrategy() #分散ストラテジーの作成
     
     #説明変数の数、目的変数の数、学習データの割合を設定する。
     def set_initial(self,  num_featureValue, num_output, trainRow):
@@ -34,28 +31,29 @@ class DeepLSetting:
     #modelにNN構造を手動で設定する
     def set_modelLayerAndNode(self,num_nodeList: list, activation="relu", dropout=0.2):
         self.num_nodeList = num_nodeList.copy()
-        self.model.add(Dense(num_nodeList[1], input_shape=(num_nodeList[0],)))
-        #self.model.add(Activation(activation))
-        self.model.add(Dropout(dropout))
-        if(len(num_nodeList) == 2):
-            return
-        for i in range(2, len(num_nodeList)):
-            self.model.add(Dense(num_nodeList[i]))
+        with self.strategy.scope():
+            self.model.add(tf.keras.layers.Dense(num_nodeList[1], input_shape=(num_nodeList[0],)))
             #self.model.add(Activation(activation))
-            if i < len(num_nodeList)-1:
-                self.model.add(Dropout(dropout))
+            self.model.add(tf.keras.layers.Dropout(dropout))
+            if(len(num_nodeList) == 2):
+                return
+            for i in range(2, len(num_nodeList)):
+                self.model.add(tf.keras.layers.Dense(num_nodeList[i]))
+                #self.model.add(Activation(activation))
+                if i < len(num_nodeList)-1:
+                    self.model.add(tf.keras.layers.Dropout(dropout))
 
     #モデルをコンパイルする。
-    def model_compile(self, loss_tmp='mean_squared_error', optimizer_tmp=opt.Adam(), metrics_tmp=["mae"],run_eagerly=True):
-        optimizer_tmp = hvd.DistributedOptimizer(optimizer_tmp)
-        self.model.compile(
-        loss = loss_tmp,
-        optimizer=optimizer_tmp,
-        metrics=metrics_tmp,
-        experimental_run_tf_function=False)
+    def model_compile(self, loss_tmp='mean_squared_error', optimizer_tmp=tf.keras.optimizers.Adam(), metrics_tmp=["mae"],run_eagerly=True):
+        with self.strategy.scope():
+            self.model.compile(
+            loss = loss_tmp,
+            optimizer=optimizer_tmp,
+            metrics=metrics_tmp,
+            experimental_run_tf_function=False)
 
     #ベイズ最適化用の関数
-    def func(self, num_layer, num_node, dropout, batch, data=None, num_epoch=3000, loss_tmp='mean_squared_error', optimizer_tmp=opt.Adam(), k_fold=0):
+    def func(self, num_layer, num_node, dropout, batch, data=None, num_epoch=3000, loss_tmp='mean_squared_error', optimizer_tmp=tf.keras.optimizers.Adam(), k_fold=0):
         data_tmp = data.copy()
         nodeList = [self.num_featureValue]
         for i in range(1, int(num_layer)):
@@ -64,7 +62,7 @@ class DeepLSetting:
                 break
             nodeList.append(int(num_node))
         with self.strategy.scope():
-            self.model = Sequential() #モデルの初期化
+            self.model = tf.keras.Sequential() #モデルの初期化
             self.set_modelLayerAndNode(nodeList, dropout=dropout) #モデル構造の定義
             self.model_compile(loss_tmp=loss_tmp, optimizer_tmp=optimizer_tmp)
         #データの準備
@@ -83,7 +81,7 @@ class DeepLSetting:
             score = self.model.evaluate(X_test, y_test, verbose=0)
         return -40000*score[0]
     
-    def func_ps(self, x, data=None, num_epoch=3000, loss_tmp='mean_squared_error', optimizer_tmp=opt.Adam()):
+    def func_ps(self, x, data=None, num_epoch=3000, loss_tmp='mean_squared_error', optimizer_tmp=tf.keras.optimizers.Adam()):
         y = []
         for i in range(len(x)):
             score = -1*self.func(x[i,0], x[i,1], x[i,2], x[i, 3], data=data, num_epoch=num_epoch, loss_tmp=loss_tmp, optimizer_tmp=optimizer_tmp)
@@ -92,14 +90,14 @@ class DeepLSetting:
 
     #NN構造をレイヤー数、ノード数、ドロップアウト、バッチ数を最適化する。(ベイズ最適化)
  
-    def bayesOpt(self, data, pbounds,num_epoch=3000, n_iter=25, loss_tmp='mean_squared_error', optimizer_tmp=opt.Adam(), k_fold=0):
+    def bayesOpt(self, data, pbounds,num_epoch=3000, n_iter=25, loss_tmp='mean_squared_error', optimizer_tmp=tf.keras.optimizers.Adam(), k_fold=0):
         if(self.num_featureValue == None):
             raise Exception("先にset_initial関数で初期化してください。")
         self.func.__func__.__defaults__ = data, num_epoch, loss_tmp, optimizer_tmp, k_fold
         optimizer = BayesianOptimization(f=self.func, pbounds=pbounds)
         optimizer.maximize(init_points=5, n_iter=n_iter)
     #NN構造をレイヤー数、ノード数、ドロップアウト、バッチ数を最適化する。(PSO最適化)
-    def psoOpt(self, data,num_epoch=3000, n_iter=25, loss_tmp='mean_squared_error', optimizer_tmp=opt.Adam()):
+    def psoOpt(self, data,num_epoch=3000, n_iter=25, loss_tmp='mean_squared_error', optimizer_tmp=tf.keras.optimizers.Adam()):
         if(self.num_featureValue == None):
             raise Exception("先にset_initial関数で初期化してください。")
         self.func_ps.__func__.__defaults__ = data, num_epoch, loss_tmp, optimizer_tmp
@@ -120,10 +118,10 @@ class DeepLSetting:
         f.close()
 
     #K分割交差検証
-    def k_foldCrossValidation(self, k, X_train, y_train, nodeList, dropout, num_epoch, batch, loss_tmp='mean_squared_error', optimizer_tmp=opt.Adam()):
+    def k_foldCrossValidation(self, k, X_train, y_train, nodeList, dropout, num_epoch, batch, loss_tmp='mean_squared_error', optimizer_tmp=tf.keras.optimizers.Adam()):
         kf = KFold(n_splits=k, shuffle=True)
         all_test_loss=[]
-        self.model = Sequential() #モデルの初期化
+        self.model = tf.keras.Sequential() #モデルの初期化
         self.set_modelLayerAndNode(nodeList, dropout=dropout)
         self.model_compile(loss_tmp=loss_tmp, optimizer_tmp=optimizer_tmp)
         for train_index, val_index in kf.split(X_train,y_train):

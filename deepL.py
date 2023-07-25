@@ -13,18 +13,6 @@ from sklearn.model_selection import train_test_split
 from skopt import gp_minimize
 from bayes_opt import BayesianOptimization
 import tensorflow as tf
-import horovod.keras as hvd
-
-
-# Horovod初期化
-hvd.init()
-print(hvd.rank())
-# TensorFlowの設定
-gpus = tf.config.experimental.list_physical_devices('GPU')
-for gpu in gpus:
-    tf.config.experimental.set_memory_growth(gpu, True)
-if gpus:
-    tf.config.experimental.set_visible_devices(gpus[hvd.local_rank()], 'GPU')
 
 #csvを受け取って、トレーニングを行う。
 def deepL_keras(csv, dls, num_epoch, batch, plot=True, k_fold=False):
@@ -35,21 +23,11 @@ def deepL_keras(csv, dls, num_epoch, batch, plot=True, k_fold=False):
     X_test = X[dls.trainRow[1]:len(X)]
     y_train = y[dls.trainRow[0]:dls.trainRow[1]]
     y_test = y[dls.trainRow[1]:len(X)]
-   
-    callbacks = [
-    # Horovod: broadcast initial variable states from rank 0 to all other processes.
-    # This is necessary to ensure consistent initialization of all workers when
-    # training is started with random weights or restored from a checkpoint.
-    hvd.callbacks.BroadcastGlobalVariablesCallback(0),
-    ]
-    # Horovod: save checkpoints only on worker 0 to prevent other workers from corrupting them.
-    if hvd.rank() == 0:
-        callbacks.append(keras.callbacks.ModelCheckpoint('./checkpoint-{epoch}.h5'))
 
-    history = dls.model.fit(X_train, y_train, steps_per_epoch=8//hvd.size(), epochs=num_epoch, verbose=1 if hvd.rank() == 0 else 0)
+    history = dls.model.fit(X_train, y_train, batch_size=batch, epochs=num_epoch, verbose=1)
     score = dls.model.evaluate(X_test, y_test, verbose=0)
     
-    if plot and hvd.rank() == 0:
+    if plot:
         plt.plot(history.history['loss'][10:])
         plt.title('Model loss')
         plt.ylabel('Loss')
@@ -91,9 +69,7 @@ dls.psoOpt(data, 5000, 100)
 dls = DeepLSetting()
 dls.set_initial(40,2,[0,39])
 dls.set_modelLayerAndNode([40,512,512,2], dropout=0.2)
-optimizer = opt.Adam()
-optimizer = hvd.DistributedOptimizer(optimizer)
-dls.model.compile(loss = 'mean_squared_error', optimizer=optimizer, metrics=["mae"], experimental_run_tf_function=False)
+dls.model_compile()
 dls.model.summary()
 data = pd.read_csv("TrainingData/out0626.csv")
 #データを正規化
